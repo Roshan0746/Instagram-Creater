@@ -22,10 +22,8 @@ def fixed_normalize(tz): return pytz.utc
 apscheduler.util.astimezone = fixed_normalize
 
 # --- 2. CONFIGURATION (RAILWAY READY) ---
-# Reads variables from Railway Dashboard. Defaults provided for safety.
 BOT_TOKEN = os.getenv("BOT_TOKEN") 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) 
-
 STATE_EMAIL, STATE_OTP = range(2)
 
 USER_AGENTS = [
@@ -33,12 +31,21 @@ USER_AGENTS = [
     'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36'
 ]
 
-# OPTIONAL: Add proxies here if Instagram blocks Railway IP
-# Format: "http://user:pass@ip:port"
-PROXIES = [] 
+# Cleaned Proxy List with http:// prefix
+PROXIES = [
+    "http://27.147.137.234:9108",
+    "http://101.47.16.15:7890",
+    "http://181.78.194.249:999",
+    "http://202.5.57.26:11726",
+    "http://101.47.16.101:7890",
+    "http://20.78.26.206:8561",
+    "http://20.210.76.104:8561",
+    "http://8.210.148.99:1122",
+    "http://20.27.15.111:8561",
+    "http://20.27.15.49:8561"
+]
 
-# --- 3. ACCESS DATABASE (TEMP PATH FIX) ---
-# Uses /tmp/ folder to avoid permission errors on Railway
+# --- 3. ACCESS DATABASE ---
 DB_PATH = '/tmp/access_control.db'
 
 def init_db():
@@ -47,14 +54,12 @@ def init_db():
     c.execute('CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY, expiry TEXT)')
     try: c.execute("ALTER TABLE whitelist ADD COLUMN expiry TEXT")
     except sqlite3.OperationalError: pass 
-    # Auto-add Admin if ID is valid
     if ADMIN_ID != 0:
         c.execute("INSERT OR IGNORE INTO whitelist (user_id, expiry) VALUES (?, ?)", (ADMIN_ID, "2099-01-01 00:00:00"))
     conn.commit()
     conn.close()
 
 def get_user_access(uid):
-    """Checks validity for UI display"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT expiry FROM whitelist WHERE user_id=?", (uid,))
@@ -82,6 +87,7 @@ class InstaCreatorAsync:
         self.password = f"{email.split('@')[0].capitalize()}{random.randint(10,99)}#@*"
         self.full_name = f"{random.choice(['Aarav', 'Vivaan'])} {random.choice(['Sharma', 'Patel'])}"
         self.ua = random.choice(USER_AGENTS)
+        # Random proxy selection from list
         self.proxy = random.choice(PROXIES) if PROXIES else None
         self.session = None; self.username = ""; self.signup_code = ""
 
@@ -143,60 +149,42 @@ class InstaCreatorAsync:
 # --- 5. UI HANDLERS ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     user = u.effective_user
-    name = user.first_name 
     is_ok, expiry = get_user_access(user.id)
-    
     if is_ok:
         t_left = "Unlimited" if (expiry and expiry.year > 2090) else str(expiry - datetime.now()).split('.')[0]
         msg = (f"✨ <b>Premium Session Active</b>\n"
                f"──────────────────\n"
-               f"👤 <b>Member:</b> <code>{name}</code>\n"
+               f"👤 <b>Member:</b> <code>{user.first_name}</code>\n"
                f"🛡️ <b>Status:</b> <code>Authorized</code>\n"
                f"⏳ <b>Validity:</b> <code>{t_left}</code>\n"
                f"──────────────────\n"
-               f"Ready to generate new accounts.\n"
-               f"<i>Tap the button below to start.</i>")
+               f"Ready to generate new accounts.")
         kb = [['📸 Create Account']]
         if user.id == ADMIN_ID: kb.append(['⚙️ Admin Panel'])
-        
         sent_msg = await u.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
-        
         c.job_queue.run_repeating(update_timer_job, interval=10, first=10, chat_id=u.effective_chat.id, 
-                                  data={"msg_id": sent_msg.message_id, "uid": user.id, "name": name})
+                                  data={"msg_id": sent_msg.message_id, "uid": user.id, "name": user.first_name})
     else:
         kb = [[InlineKeyboardButton("📩 Request Exclusive Access", callback_data=f"req_{user.id}")]]
-        text = (f"🙏 <b>Greetings, {name}!</b>\n\n"
-                f"To maintain service stability, access to this tool is currently limited to <b>Authorized Members</b> only.\n\n"
-                f"💡 <i>Please tap below to request your access window.</i>")
-        await u.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
+        await u.message.reply_text(f"🙏 <b>Greetings!</b>\n\nAccess is currently limited.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
 
-# Timer Background Job
 async def update_timer_job(c: ContextTypes.DEFAULT_TYPE):
     job = c.job
     is_ok, expiry = get_user_access(job.data["uid"])
     if not is_ok:
-        await c.bot.edit_message_text("⌛ <b>Session Expired.</b>\nPlease request a new access window.", 
-                                      chat_id=job.chat_id, message_id=job.data["msg_id"], parse_mode='HTML')
+        await c.bot.edit_message_text("⌛ <b>Session Expired.</b>", chat_id=job.chat_id, message_id=job.data["msg_id"], parse_mode='HTML')
         job.schedule_removal(); return
-
     t_left = "Unlimited" if expiry.year > 2090 else str(expiry - datetime.now()).split('.')[0]
-    new_msg = (f"✨ <b>Premium Session Active</b>\n"
-               f"──────────────────\n"
-               f"👤 <b>Member:</b> <code>{job.data['name']}</code>\n"
-               f"⏳ <b>Validity:</b> <code>{t_left}</code>\n"
-               f"──────────────────\n"
-               f"Ready to generate new accounts.")
+    new_msg = (f"✨ <b>Premium Session Active</b>\n──────────────────\n👤 <b>Member:</b> <code>{job.data['name']}</code>\n⏳ <b>Validity:</b> <code>{t_left}</code>\n──────────────────")
     try: await c.bot.edit_message_text(new_msg, chat_id=job.chat_id, message_id=job.data["msg_id"], parse_mode='HTML')
     except: pass
 
-# --- 6. ADMIN & CALLBACKS ---
 async def admin_dashboard(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if u.effective_user.id != ADMIN_ID: return
     conn = sqlite3.connect(DB_PATH); c_db = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c_db.execute("SELECT user_id, expiry FROM whitelist WHERE expiry > ? AND user_id != ?", (now, ADMIN_ID))
     users = c_db.fetchall(); conn.close()
-    if not users: return await u.message.reply_text("📊 <b>Dashboard Active</b>\n\nNo active users currently.", parse_mode='HTML')
     msg = "📊 <b>Active Users Board</b>\n──────────────────\n"
     for uid, expiry_str in users:
         exp = datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
@@ -209,58 +197,53 @@ async def admin_until(u: Update, c: ContextTypes.DEFAULT_TYPE):
         uid, h_m = int(c.args[0]), c.args[1]
         set_access_db(uid, f"{datetime.now().strftime('%Y-%m-%d')} {h_m}:00")
         await u.message.reply_text(f"✅ Access set for {uid} until {h_m}")
-        await c.bot.send_message(uid, f"✨ Access Granted until <code>{h_m}</code>", parse_mode='HTML')
     except: await u.message.reply_text("❌ Format: /until [ID] [HH:MM]")
 
 async def handle_callbacks(u: Update, c: ContextTypes.DEFAULT_TYPE):
     query = u.callback_query; data = query.data
     if data.startswith("req_"):
         uid = data.split("_")[1]
-        kb = [[InlineKeyboardButton("⏱️ +10m", callback_data=f"add_{uid}_10"), InlineKeyboardButton("⏱️ +20m", callback_data=f"add_{uid}_20")],
-              [InlineKeyboardButton("❌ Deny", callback_data=f"deny_{uid}")]]
+        kb = [[InlineKeyboardButton("⏱️ +10m", callback_data=f"add_{uid}_10"), InlineKeyboardButton("❌ Deny", callback_data=f"deny_{uid}")]]
         await c.bot.send_message(ADMIN_ID, f"🔔 Request: <code>{uid}</code>", reply_markup=InlineKeyboardMarkup(kb), parse_mode='HTML')
         await query.answer("Request sent!"); await query.edit_message_text("⏳ Waiting for Admin...")
     elif data.startswith("add_"):
         _, uid, mins = data.split("_"); exp = (datetime.now() + timedelta(minutes=int(mins))).strftime("%Y-%m-%d %H:%M:%S")
-        set_access_db(int(uid), exp); await query.edit_message_text(f"✅ Approved {uid}"); await c.bot.send_message(int(uid), f"✨ Access Granted for {mins}m!")
+        set_access_db(int(uid), exp); await query.edit_message_text(f"✅ Approved"); await c.bot.send_message(int(uid), f"✨ Access Granted for {mins}m!")
 
-# --- 7. CORE ENGINE FLOW ---
 async def start_create(u, c):
     is_ok, _ = get_user_access(u.effective_user.id)
-    if not is_ok: await u.message.reply_text("❌ <b>Access Expired!</b>", parse_mode='HTML'); return ConversationHandler.END
-    await u.message.reply_text("📧 <b>Input Required</b>\n──────────────────\nPlease enter the <b>Email Address</b>:", parse_mode='HTML', reply_markup=ReplyKeyboardRemove()); return STATE_EMAIL
+    if not is_ok: return ConversationHandler.END
+    await u.message.reply_text("📧 Please enter the <b>Email Address</b>:", parse_mode='HTML', reply_markup=ReplyKeyboardRemove()); return STATE_EMAIL
 
 async def process_email(u, c):
-    email = u.message.text.strip(); status_msg = await u.message.reply_text("⚙️ <b>Initializing Session...</b>", parse_mode='HTML')
-    creator = InstaCreatorAsync(email); await creator.init_session(); await status_msg.edit_text("📡 <b>Warming up engines...</b>", parse_mode='HTML')
+    email = u.message.text.strip(); status_msg = await u.message.reply_text("⚙️ <b>Initializing...</b>")
+    creator = InstaCreatorAsync(email); await creator.init_session()
     if (await creator.warmup())[0]:
-        await status_msg.edit_text("🔎 <b>Searching Username...</b>", parse_mode='HTML'); await asyncio.sleep(1.2); avail, _ = await creator.check_availability()
+        avail, _ = await creator.check_availability()
         if avail:
-            await status_msg.edit_text(f"👤 <b>Identity:</b> <code>@{creator.username}</code>", parse_mode='HTML'); await asyncio.sleep(1.2); sent, _ = await creator.send_otp()
+            sent, _ = await creator.send_otp()
             if sent:
                 c.user_data['creator'] = creator
-                await status_msg.edit_text(f"✅ <b>OTP Sent Successfully!</b>\n──────────────────\n📧 <b>Email:</b> <code>{email}</code>\n🆔 <b>User:</b> <code>{creator.username}</code>\n\n👇 <b>Enter the 6-digit code below:</b>", parse_mode='HTML'); return STATE_OTP
+                await status_msg.edit_text(f"✅ <b>OTP Sent!</b>\n📧 <b>Email:</b> <code>{email}</code>\n🆔 <b>User:</b> <code>{creator.username}</code>", parse_mode='HTML'); return STATE_OTP
     await status_msg.edit_text("❌ <b>Process Failed.</b>"); return ConversationHandler.END
 
 async def process_otp(u, c):
-    otp = u.message.text.strip(); creator = c.user_data.get('creator'); status_msg = await u.message.reply_text("🔐 <b>Verifying...</b>", parse_mode='HTML')
-    for step in ["🎂 Setting Birthdate...", "👤 Identity Confirmed...", "🔑 Applying Password...", "🧬 Finalizing..."]:
-        await asyncio.sleep(1.2); await status_msg.edit_text(step, parse_mode='HTML')
+    otp = u.message.text.strip(); creator = c.user_data.get('creator'); status_msg = await u.message.reply_text("🔐 <b>Verifying...</b>")
     success, result = await creator.verify_otp_and_create(otp)
     if success:
-        await status_msg.edit_text(f"🎉 <b>ACCOUNT CREATED</b>\n──────────────────\n👤 <b>User:</b> <code>{creator.username}</code>\n🔑 <b>Pass:</b> <code>{creator.password}</code>\n──────────────────\n🍪 <b>Cookies:</b>\n<pre>{html.escape(result)}</pre>", parse_mode='HTML')
-        await u.message.reply_text("✨ Next account?", reply_markup=ReplyKeyboardMarkup([['📸 Create Account']], resize_keyboard=True), parse_mode='HTML')
+        await status_msg.edit_text(f"🎉 <b>ACCOUNT CREATED</b>\n──────────────────\n👤 <b>User:</b> <code>{creator.username}</code>\n🔑 <b>Pass:</b> <code>{creator.password}</code>\n──────────────────\n🍪 <b>Cookies:</b>\n<pre>{html.escape(result[:100])}...</pre>", parse_mode='HTML')
     else: await status_msg.edit_text(f"❌ Failed: {html.escape(result[:50])}"); return ConversationHandler.END
 
 def main():
     if not BOT_TOKEN:
-        print("❌ Error: BOT_TOKEN variable not found on Railway.")
+        print("❌ Error: BOT_TOKEN not found.")
         return
     init_db(); app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', start)); app.add_handler(CommandHandler('until', admin_until))
     app.add_handler(CallbackQueryHandler(handle_callbacks)); app.add_handler(MessageHandler(filters.Regex('^⚙️ Admin Panel$'), admin_dashboard))
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex('^📸 Create Account$'), start_create)],
         states={STATE_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_email)], STATE_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_otp)]}, fallbacks=[CommandHandler('start', start)]))
-    print("🤖 Bot Started on Railway!"); app.run_polling()
+    print("🤖 Bot Started on Railway with Proxies!"); app.run_polling()
 
 if __name__ == "__main__": main()
+                
