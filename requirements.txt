@@ -1,0 +1,6 @@
+python-telegram-bot
+aiohttp
+yarl
+pytz
+apscheduler
+filetype
