@@ -21,9 +21,11 @@ import pytz, apscheduler.util
 def fixed_normalize(tz): return pytz.utc
 apscheduler.util.astimezone = fixed_normalize
 
-# --- 2. CONFIGURATION ---
-BOT_TOKEN = "8368478844:AAGXxmy7zN6qPZrnyk-vC-tp_j5LqyW0oi8"
-ADMIN_ID = 421311524 # Master Admin
+# --- 2. CONFIGURATION (RAILWAY READY) ---
+# Reads variables from Railway Dashboard. Defaults provided for safety.
+BOT_TOKEN = os.getenv("BOT_TOKEN") 
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) 
+
 STATE_EMAIL, STATE_OTP = range(2)
 
 USER_AGENTS = [
@@ -31,20 +33,33 @@ USER_AGENTS = [
     'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Mobile Safari/537.36'
 ]
 
-# --- 3. ACCESS DATABASE ---
+# OPTIONAL: Add proxies here if Instagram blocks Railway IP
+# Format: "http://user:pass@ip:port"
+PROXIES = [] 
+
+# --- 3. ACCESS DATABASE (TEMP PATH FIX) ---
+# Uses /tmp/ folder to avoid permission errors on Railway
+DB_PATH = '/tmp/access_control.db'
+
 def init_db():
-    conn = sqlite3.connect('access_control.db'); c = conn.cursor()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
     c.execute('CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY, expiry TEXT)')
     try: c.execute("ALTER TABLE whitelist ADD COLUMN expiry TEXT")
     except sqlite3.OperationalError: pass 
-    c.execute("INSERT OR IGNORE INTO whitelist (user_id, expiry) VALUES (?, ?)", (ADMIN_ID, "2099-01-01 00:00:00"))
-    conn.commit(); conn.close()
+    # Auto-add Admin if ID is valid
+    if ADMIN_ID != 0:
+        c.execute("INSERT OR IGNORE INTO whitelist (user_id, expiry) VALUES (?, ?)", (ADMIN_ID, "2099-01-01 00:00:00"))
+    conn.commit()
+    conn.close()
 
 def get_user_access(uid):
     """Checks validity for UI display"""
-    conn = sqlite3.connect('access_control.db'); c = conn.cursor()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
     c.execute("SELECT expiry FROM whitelist WHERE user_id=?", (uid,))
-    res = c.fetchone(); conn.close()
+    res = c.fetchone()
+    conn.close()
     if not res or res[0] is None: return False, None
     try:
         expiry = datetime.strptime(res[0], "%Y-%m-%d %H:%M:%S")
@@ -53,11 +68,13 @@ def get_user_access(uid):
     except: return False, None
 
 def set_access_db(uid, expiry_str):
-    conn = sqlite3.connect('access_control.db'); c = conn.cursor()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO whitelist (user_id, expiry) VALUES (?, ?)", (uid, expiry_str))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
-# --- 4. THE ENGINE (SAME TO SAME - UNTOUCHED) ---
+# --- 4. THE ENGINE ---
 class InstaCreatorAsync:
     def __init__(self, email):
         self.email = email
@@ -65,6 +82,7 @@ class InstaCreatorAsync:
         self.password = f"{email.split('@')[0].capitalize()}{random.randint(10,99)}#@*"
         self.full_name = f"{random.choice(['Aarav', 'Vivaan'])} {random.choice(['Sharma', 'Patel'])}"
         self.ua = random.choice(USER_AGENTS)
+        self.proxy = random.choice(PROXIES) if PROXIES else None
         self.session = None; self.username = ""; self.signup_code = ""
 
     async def init_session(self):
@@ -77,9 +95,9 @@ class InstaCreatorAsync:
 
     async def warmup(self):
         try:
-            await self.session.get('https://www.instagram.com/')
+            await self.session.get('https://www.instagram.com/', proxy=self.proxy)
             await asyncio.sleep(random.uniform(5, 8))
-            async with self.session.get('https://www.instagram.com/accounts/emailsignup/') as r:
+            async with self.session.get('https://www.instagram.com/accounts/emailsignup/', proxy=self.proxy) as r:
                 cookies = self.session.cookie_jar.filter_cookies(URL('https://www.instagram.com'))
                 if 'csrftoken' in cookies: self.session.headers.update({'X-CSRFToken': cookies['csrftoken'].value})
             return True, "Warmup Done"
@@ -88,7 +106,7 @@ class InstaCreatorAsync:
     async def check_availability(self):
         url = 'https://www.instagram.com/api/v1/web/accounts/web_create_ajax/attempt/'
         payload = {'enc_password': f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{self.password}", 'email': self.email, 'first_name': self.full_name, 'username': '', 'client_id': self.device_id, 'optIntoOneTap': 'false'}
-        async with self.session.post(url, data=payload) as res:
+        async with self.session.post(url, data=payload, proxy=self.proxy) as res:
             data = await res.json()
             if 'username_suggestions' in data:
                 self.username = data['username_suggestions'][0]; return True, self.username
@@ -97,40 +115,39 @@ class InstaCreatorAsync:
     async def send_otp(self):
         try:
             age_url = 'https://www.instagram.com/api/v1/web/consent/check_age_eligibility/'
-            await self.session.post(age_url, data={'day': '10', 'month': '5', 'year': '1998'})
+            await self.session.post(age_url, data={'day': '10', 'month': '5', 'year': '1998'}, proxy=self.proxy)
             await asyncio.sleep(2)
             otp_url = 'https://www.instagram.com/api/v1/accounts/send_verify_email/'
-            async with self.session.post(otp_url, data={'device_id': self.device_id, 'email': self.email}) as res:
+            async with self.session.post(otp_url, data={'device_id': self.device_id, 'email': self.email}, proxy=self.proxy) as res:
                 text = await res.text(); return '"email_sent":true' in text, text
         except Exception as e: return False, str(e)
 
     async def verify_otp_and_create(self, otp):
         try:
             v_url = 'https://www.instagram.com/api/v1/accounts/check_confirmation_code/'
-            async with self.session.post(v_url, data={'code': otp, 'device_id': self.device_id, 'email': self.email}) as res:
+            async with self.session.post(v_url, data={'code': otp, 'device_id': self.device_id, 'email': self.email}, proxy=self.proxy) as res:
                 data = await res.json()
                 if 'signup_code' in data: self.signup_code = data['signup_code']
                 else: return False, "Invalid OTP"
             await asyncio.sleep(random.uniform(3, 5))
             c_url = 'https://www.instagram.com/api/v1/web/accounts/web_create_ajax/'
             payload = {'enc_password': f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{self.password}", 'email': self.email, 'first_name': self.full_name, 'username': self.username, 'client_id': self.device_id, 'force_sign_up_code': self.signup_code, 'day': '10', 'month': '5', 'year': '1998'}
-            async with self.session.post(c_url, data=payload) as res:
+            async with self.session.post(c_url, data=payload, proxy=self.proxy) as res:
                 text = await res.text()
                 if '"account_created":true' not in text: return False, text[:100]
-            await asyncio.sleep(2); await self.session.get('https://www.instagram.com/accounts/edit/')
+            await asyncio.sleep(2); await self.session.get('https://www.instagram.com/accounts/edit/', proxy=self.proxy)
             cookies_list = [f"{c.key}={c.value}" for c in self.session.cookie_jar]
             return True, "; ".join(cookies_list)
         except Exception as e: return False, str(e)
 
-# --- 5. UI HANDLERS (Feature: Live Panel & English Wording) ---
+# --- 5. UI HANDLERS ---
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     user = u.effective_user
-    name = user.first_name # Feature 2: Personalized Name
+    name = user.first_name 
     is_ok, expiry = get_user_access(user.id)
     
     if is_ok:
         t_left = "Unlimited" if (expiry and expiry.year > 2090) else str(expiry - datetime.now()).split('.')[0]
-        # Feature 3: Professional English Wording
         msg = (f"✨ <b>Premium Session Active</b>\n"
                f"──────────────────\n"
                f"👤 <b>Member:</b> <code>{name}</code>\n"
@@ -144,11 +161,9 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         
         sent_msg = await u.message.reply_text(msg, reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True), parse_mode='HTML')
         
-        # Feature 1: Start 10s Live Countdown
         c.job_queue.run_repeating(update_timer_job, interval=10, first=10, chat_id=u.effective_chat.id, 
                                   data={"msg_id": sent_msg.message_id, "uid": user.id, "name": name})
     else:
-        # Feature 3: Respectful English Request UI
         kb = [[InlineKeyboardButton("📩 Request Exclusive Access", callback_data=f"req_{user.id}")]]
         text = (f"🙏 <b>Greetings, {name}!</b>\n\n"
                 f"To maintain service stability, access to this tool is currently limited to <b>Authorized Members</b> only.\n\n"
@@ -177,7 +192,7 @@ async def update_timer_job(c: ContextTypes.DEFAULT_TYPE):
 # --- 6. ADMIN & CALLBACKS ---
 async def admin_dashboard(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if u.effective_user.id != ADMIN_ID: return
-    conn = sqlite3.connect('access_control.db'); c_db = conn.cursor()
+    conn = sqlite3.connect(DB_PATH); c_db = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c_db.execute("SELECT user_id, expiry FROM whitelist WHERE expiry > ? AND user_id != ?", (now, ADMIN_ID))
     users = c_db.fetchall(); conn.close()
@@ -238,12 +253,14 @@ async def process_otp(u, c):
     else: await status_msg.edit_text(f"❌ Failed: {html.escape(result[:50])}"); return ConversationHandler.END
 
 def main():
+    if not BOT_TOKEN:
+        print("❌ Error: BOT_TOKEN variable not found on Railway.")
+        return
     init_db(); app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', start)); app.add_handler(CommandHandler('until', admin_until))
     app.add_handler(CallbackQueryHandler(handle_callbacks)); app.add_handler(MessageHandler(filters.Regex('^⚙️ Admin Panel$'), admin_dashboard))
     app.add_handler(ConversationHandler(entry_points=[MessageHandler(filters.Regex('^📸 Create Account$'), start_create)],
         states={STATE_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_email)], STATE_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_otp)]}, fallbacks=[CommandHandler('start', start)]))
-    print("🤖 Bot Started!"); app.run_polling()
+    print("🤖 Bot Started on Railway!"); app.run_polling()
 
 if __name__ == "__main__": main()
-      
